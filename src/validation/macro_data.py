@@ -3,7 +3,7 @@ import pandas as pd
 
 class DataValidationError(Exception):
     """Raised when macroeconomic data fails validation."""
-
+#Data Quality Rules
 
 def validate_macro_series(
     df: pd.DataFrame,
