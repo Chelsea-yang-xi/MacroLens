@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.DS_Store
+
+.env
+
+data/raw/*
+data/processed/*
+data/curated/*
+
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/curated/.gitkeep
