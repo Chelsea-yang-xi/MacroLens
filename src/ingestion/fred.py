@@ -18,7 +18,10 @@ def fetch_fred_series(
     raw_dir: str = "data/raw",
 ) -> Path:
     """
-    Download a FRED time series and persist the unmodified raw response.
+    Download a FRED time series and persist the unmodified raw CSV response.
+
+    The function validates the upstream response before saving it so that
+    HTML maintenance pages or other unexpected payloads are not stored as CSV.
 
     Parameters
     ----------
@@ -35,36 +38,95 @@ def fetch_fred_series(
     """
 
     raw_path = Path(raw_dir)
-    raw_path.mkdir(parents=True, exist_ok=True)
+    raw_path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     params = {
-        "id": series_id
+        "id": series_id,
     }
 
     try:
         response = requests.get(
             FRED_BASE_URL,
             params=params,
-            timeout=30,  #alow a 30 seconds timeout to wait resilence 
+            timeout=30,
         )
 
-        response.raise_for_status()  #fail fast 
+        # Fail fast if FRED returns an HTTP error such as 404 or 500.
+        response.raise_for_status()
 
     except requests.RequestException as exc:
         raise FredIngestionError(
-            f"Failed to fetch FRED series '{series_id}'" #abstraction
+            f"Failed to fetch FRED series '{series_id}'"
         ) from exc
 
-    timestamp = datetime.now(timezone.utc).strftime(
+    # HTTP 200 does not guarantee that the returned payload is valid data.
+    # FRED may, for example, return an HTML maintenance page.
+    content_type = response.headers.get(
+        "Content-Type",
+        "",
+    )
+
+    if "html" in content_type.lower():
+        preview = response.text[:200].replace(
+            "\n",
+            " ",
+        )
+
+        raise FredIngestionError(
+            f"FRED returned HTML instead of CSV "
+            f"for series '{series_id}'. "
+            f"The upstream service may be unavailable "
+            f"or undergoing maintenance. "
+            f"Response preview: {preview}"
+        )
+
+    response_text = response.text.lstrip()
+
+    expected_header = (
+        f"observation_date,{series_id}"
+    )
+
+    if not response_text.startswith(
+        expected_header
+    ):
+        preview = response_text[:200].replace(
+            "\n",
+            " ",
+        )
+
+        raise FredIngestionError(
+            f"Unexpected FRED response for "
+            f"series '{series_id}'. "
+            f"Expected CSV header "
+            f"'{expected_header}', "
+            f"but received: {preview}"
+        )
+
+    timestamp = datetime.now(
+        timezone.utc
+    ).strftime(
         "%Y%m%dT%H%M%SZ"
     )
 
-    filename = f"{series_id}_{timestamp}.csv" #Data lineage
-    file_path = raw_path / filename
+    filename = (
+        f"{series_id}_{timestamp}.csv"
+    )
 
-    file_path.write_bytes(response.content) #save the raw
+    file_path = (
+        raw_path / filename
+    )
 
-    checksum = hashlib.sha256(   #idempotency
+    # Preserve the exact upstream payload as the raw source of truth.
+    file_path.write_bytes(
+        response.content
+    )
+
+    # SHA-256 acts as a content fingerprint.
+    # Later we can use it for duplicate detection or lineage checks.
+    checksum = hashlib.sha256(
         response.content
     ).hexdigest()
 
@@ -88,7 +150,9 @@ def parse_fred_series(
     Parse a raw FRED CSV into MacroLens' standard schema.
     """
 
-    df = pd.read_csv(raw_file)
+    df = pd.read_csv(
+        raw_file
+    )
 
     expected_columns = {
         "observation_date",
@@ -96,7 +160,8 @@ def parse_fred_series(
     }
 
     missing_columns = (
-        expected_columns - set(df.columns)
+        expected_columns
+        - set(df.columns)
     )
 
     if missing_columns:
@@ -125,8 +190,10 @@ def parse_fred_series(
     df["series_id"] = series_id
     df["source"] = "FRED"
 
+    # Store technical timestamps in UTC so local machine/server
+    # timezone differences do not create ambiguity.
     df["ingested_at"] = datetime.now(
-        timezone.utc  #store timestamps in UTC
+        timezone.utc
     )
 
     return df[
